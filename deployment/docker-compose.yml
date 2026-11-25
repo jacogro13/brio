@@ -1,0 +1,60 @@
+name: chatbot
+
+services:
+  api:
+    image: ghcr.io/${GHCR_OWNER:?set GHCR_OWNER in .env}/chatbot-api:${IMAGE_TAG:-latest}
+    container_name: chatbot_api
+    env_file:
+      - .env
+    environment:
+      # Shared Postgres on shared_network (managed by Infrastructure/). The role
+      # + database are created by Infrastructure/init/01-init.sh; alembic creates
+      # the tables on container start (backend/entrypoint.sh). Connects as the
+      # least-privilege role `chatbot_app` (DB_USER/DB_PASSWORD from .env).
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@shared_postgres:5432/${DB_NAME}
+      # Chat LLM. The shared_network gateway 10.100.0.1 is the mini-PC host,
+      # where llama.cpp runs as a host systemd service (Infrastructure/llm) on
+      # :8080 — the same shared LLM used by Registro_Spese/Pasti/Blibiobot. When
+      # llama is down, sending a message errors cleanly; listing and reading
+      # existing conversations are unaffected (they only touch Postgres).
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://10.100.0.1:8080}
+      - LLM_MODEL=${LLM_MODEL}
+      # Attachments (Phase 5). The SHARED garage on shared_network (shared_garage,
+      # managed by Infrastructure/) — the same object store Blibiobot/Pasti use,
+      # NOT a chatbot-owned instance. Reach it via the `garage` service alias, NOT
+      # `shared_garage`: botocore rejects endpoint hostnames with underscores
+      # (ValueError: Invalid endpoint), so the underscore alias 500s every S3 read.
+      # The bucket + key are provisioned by Infrastructure's garage_init.sh — add
+      # `chatbot` to GARAGE_BUCKETS in Infrastructure's .env before first deploy.
+      - GARAGE_ENDPOINT=http://garage:3900
+      - GARAGE_BUCKET=${GARAGE_BUCKET:-chatbot}
+      - GARAGE_ACCESS_KEY_ID=${GARAGE_ACCESS_KEY_ID}
+      - GARAGE_SECRET_ACCESS_KEY=${GARAGE_SECRET_ACCESS_KEY}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:80/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - chatbot_network
+      - shared_network
+
+  frontend:
+    image: ghcr.io/${GHCR_OWNER:?set GHCR_OWNER in .env}/chatbot-frontend:${IMAGE_TAG:-latest}
+    container_name: chatbot_ui
+    ports:
+      - "${FRONTEND_HOST_PORT:-120}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - chatbot_network
+
+networks:
+  chatbot_network:
+    driver: bridge
+  shared_network:
+    external: true

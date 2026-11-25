@@ -1,0 +1,92 @@
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=${DB_USER:-chatbot}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME:-chatbot}
+    ports:
+      - "${DB_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-chatbot} -d ${DB_NAME:-chatbot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatbot_network
+
+  # Garage (S3-compatible) — dev-only isolated object store for attachments.
+  # In production Chatbot uses the SHARED garage (shared_garage on
+  # shared_network, managed by Infrastructure/) — see deployment/. No
+  # container_name so the chatbot_e2e project can run alongside the dev project.
+  garage:
+    image: dxflrs/garage:v1.0.1
+    volumes:
+      - ./garage/garage.toml:/etc/garage.toml:ro
+      - garage_data:/var/lib/garage
+    ports:
+      - "${GARAGE_S3_HOST_PORT:-3907}:3900"   # S3 API (host view for `make backend`)
+    command: ["/garage", "-c", "/etc/garage.toml", "server"]
+    networks:
+      - chatbot_network
+
+  # One-shot: layout → key → bucket → permissions. Idempotent, exits when done.
+  garage-init:
+    image: alpine:3.19
+    depends_on:
+      - garage
+    env_file:
+      - .env
+    volumes:
+      - ./scripts/garage_init.sh:/garage_init.sh:ro
+    entrypoint: ["sh", "-c", "apk add --no-cache curl jq > /dev/null && sh /garage_init.sh"]
+    restart: "no"
+    networks:
+      - chatbot_network
+
+  api:
+    build: ./backend
+    profiles:
+      - app
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-chatbot}:${DB_PASSWORD}@db:5432/${DB_NAME:-chatbot}
+      # In-container view of the dev object store.
+      - GARAGE_ENDPOINT=http://garage:3900
+    depends_on:
+      db:
+        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:80/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - chatbot_network
+
+  frontend:
+    build: ./frontend
+    profiles:
+      - app
+    ports:
+      - "120:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - chatbot_network
+
+volumes:
+  garage_data:
+
+networks:
+  chatbot_network:
+    driver: bridge

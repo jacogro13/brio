@@ -1,0 +1,210 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Lint (ruff)
+        run: cd backend && uv run ruff format --check . && uv run ruff check .
+
+      - name: Type check (pyright)
+        run: cd backend && uv run pyright
+
+      - name: Run unit tests
+        run: cd backend && uv run pytest tests/unit
+
+      - name: Run integration tests
+        run: cd backend && uv run pytest tests/integration
+
+      - name: Setup Node.js (frontend)
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Generated API types are up to date
+        run: make types && git diff --exit-code frontend/src/api/schema.d.ts
+
+      - name: Lint (eslint)
+        run: cd frontend && npm run lint
+
+      - name: Type check (tsc)
+        run: cd frontend && npx tsc -b
+
+      - name: Run frontend unit tests (vitest)
+        run: cd frontend && npm test
+
+  browser-e2e:
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create .env file
+        run: |
+          cat <<EOF > .env
+          DB_USER=chatbot
+          DB_PASSWORD=testpassword
+          DB_NAME=chatbot
+          DATABASE_URL=postgresql+asyncpg://chatbot:testpassword@db:5432/chatbot
+          # Auth (Phase 7). Fixed secret so the e2e stack can mint/verify tokens.
+          # This job runs the stack from docker-compose.yml only (no e2e override),
+          # so the login rate limit must be raised here — all 12 specs register +
+          # log in from one IP and would trip the 5/minute default (→ 429 → the
+          # helper injects a bad token → the auth middleware's 401→reload loop).
+          JWT_SECRET_KEY=e2e-test-secret
+          LOGIN_RATE_LIMIT=100/minute
+          # Attachments (Phase 5). garage-init reads these (its script :?-guards
+          # them) and the api uses them to reach the e2e garage. The access key
+          # id must be GK + 12 hex bytes; the admin token must match
+          # admin_token in garage/garage.toml.
+          GARAGE_BUCKET=chatbot
+          GARAGE_REGION=garage
+          GARAGE_ACCESS_KEY_ID=GK00112233445566778899aabb
+          GARAGE_SECRET_ACCESS_KEY=0011223344556677889900112233445566778899001122334455667788990011
+          GARAGE_ADMIN_TOKEN=chatbot-admin-secret
+          EOF
+
+      - name: Start full stack
+        run: docker compose --profile app up --build --wait
+        timeout-minutes: 5
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install e2e dependencies
+        run: cd e2e && npm ci
+
+      - name: Install Playwright browsers
+        run: cd e2e && npx playwright install --with-deps chromium
+
+      - name: Run browser E2E tests
+        run: cd e2e && npm test
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 7
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose down -v
+
+  build-backend:
+    runs-on: ubuntu-24.04
+    needs: browser-e2e
+    # Publishes images only where the repository variable PUBLISH_IMAGES is 'true'
+    # (the production repo); public copies and forks only run the tests.
+    if: vars.PUBLISH_IMAGES == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Lowercase repo name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> ${GITHUB_ENV}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Backend
+        id: meta-backend
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api
+          # sha-<7 chars> per commit: pin it as IMAGE_TAG to roll back
+          tags: |
+            type=ref,event=branch
+            type=sha
+
+      - name: Build and push Backend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta-backend.outputs.tags }}, ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:latest
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-frontend:
+    runs-on: ubuntu-24.04
+    needs: browser-e2e
+    # Publishes images only where the repository variable PUBLISH_IMAGES is 'true'
+    # (the production repo); public copies and forks only run the tests.
+    if: vars.PUBLISH_IMAGES == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Lowercase repo name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> ${GITHUB_ENV}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Frontend
+        id: meta-frontend
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend
+          # sha-<7 chars> per commit: pin it as IMAGE_TAG to roll back
+          tags: |
+            type=ref,event=branch
+            type=sha
+
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta-frontend.outputs.tags }}, ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,36 @@
+# Compose override applied by `make e2e` only.
+#
+# The dev `db` service binds host port 5434 so that local `make backend`
+# can reach Postgres via localhost:5434. The e2e stack runs entirely inside
+# Docker — nothing on the host needs port 5434 for e2e.
+#
+# !reset clears the inherited `ports` list so the e2e db doesn't attempt
+# to bind 5434, avoiding a port collision with the dev db.
+services:
+  db:
+    ports: !reset []
+
+  # The e2e stack runs its own isolated garage inside Docker; nothing on the
+  # host needs port 3907. !reset clears the inherited host-port binding so the
+  # e2e garage doesn't collide with the dev garage when both stacks are up.
+  garage:
+    ports: !reset []
+
+  # The e2e stack runs in isolation with no LLM reachable. Blank out
+  # LLM_BASE_URL (set in .env for dev) so the api falls back to MockLLMAdapter,
+  # whose deterministic "mock response" the specs assert on. Pin the thinking
+  # server-default OFF (overriding whatever the dev .env carries) so thinking.spec
+  # can assert both the default-off state and enabling it via the ⚙ popover.
+  api:
+    environment:
+      - LLM_BASE_URL=
+      - LLM_CHAT_ENABLE_THINKING=false
+      # Web tools OFF ⇒ mock search/fetch adapters (no real internet in e2e). The
+      # mock LLM's `[use web]` hook still drives the tool loop deterministically,
+      # so web-tools.spec can assert the activity chips.
+      - WEB_TOOLS_ENABLED=false
+      # Auth (Phase 7): a fixed secret so the e2e stack boots without depending on
+      # a JWT_SECRET_KEY in the dev .env; raise the login rate limit so the specs
+      # (each registers + logs in) don't trip the 5/minute default.
+      - JWT_SECRET_KEY=e2e-test-secret
+      - LOGIN_RATE_LIMIT=100/minute
