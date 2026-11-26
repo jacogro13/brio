@@ -1,6 +1,6 @@
 # Mobile UX Overhaul Plan
 
-Status: **planned** (2026-07-14). Implement phase by phase; each phase is independently shippable.
+Status: **done** — planned 2026-07-14, all three phases implemented. Implemented phase by phase; each phase was independently shippable.
 
 ## Context
 
