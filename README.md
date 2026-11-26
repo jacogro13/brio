@@ -3,9 +3,12 @@
 A persistent multi-conversation chat interface backed by a local LLM.
 
 Brio is called `chatbot` in the code, the images and the work records. It is the example
-app of [officina](https://github.com/jacogro13/officina), the gated workflow it was built
-with: every change since the move to that workflow has a spec, plan and review under
-`docs/work/`.
+app of [officina](https://github.com/jacogro13/officina), the gated workflow I have
+developed it with since November 2026: every change since then (001–008) has a spec, plan
+and review under `docs/work/`. Its features from before that (streaming, attachments,
+web access, multiuser, mobile layout) were built without the factory, from two plans
+written in July 2026: [`docs/IMPROVEMENT_PLAN.md`](docs/IMPROVEMENT_PLAN.md) and
+[`docs/MOBILE_UX_PLAN.md`](docs/MOBILE_UX_PLAN.md).
 
 Supports any OpenAI-compatible server — Ollama, llama.cpp, LM Studio, etc.
 
